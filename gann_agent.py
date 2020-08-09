@@ -11,16 +11,18 @@ import tflearn
 # Standard Deep Neural Network 
 from tflearn.layers.core import input_data, dropout, fully_connected 
 from tflearn.layers.estimator import regression
-
 # Convo Neural Network
 from tflearn.layers.conv import conv_2d, max_pool_2d
-
+# For graph
 import tensorflow as tf
 
+# For human training (validation of model)
+import keyboard
+
 class GANNAgent:
-    def __init__(self, fitness_top_percentile=0.05, segment_width=25, mutation_rate=0.02, learning_rate=1e-3):
+    def __init__(self, fitness_top_percentile=0.05, segment_width=25, mutation_rate=0.02, learning_rate=1e-3, width=20, height=20):
         # Environment
-        self.env = gym.make('snake2-v0', render=True, segment_width=25)
+        self.env = gym.make('snake2-v0', render=True, segment_width=25, width=width, height=height)
         self.env.reset()
 
         # Genetic Algorithm
@@ -32,7 +34,6 @@ class GANNAgent:
         self.fitness_top_percentile = fitness_top_percentile
         self.learning_rate = learning_rate # or 0.01 (or 1e-3 0.001)
         self.mutation_rate = mutation_rate
-
 
     def generate_training_data(self, generation_population = 1000, acceptance_criteria = 0.05, verbose=False, debug_render=False, debug_frequency=100, num_of_epoch=5):
         training_data = []
@@ -46,6 +47,9 @@ class GANNAgent:
             is_crossover = True
             print("[+] Models loaded with Two Parents from Generation: {GEN}".format(GEN=self.current_generation_index))
         else:
+            #debug
+            print("[*] No crossover. Randomizing inputs...")
+
             is_crossover = False
 
         print("[*] Generating training data...started.")
@@ -55,14 +59,6 @@ class GANNAgent:
             #* Verbose
             if verbose and episode > 0:
                 print("[*] Completion summary - {EPS} out of {TOTAL} - {COMPLETION}%".format(COMPLETION=episode/generation_population*100, EPS=episode, TOTAL=generation_population))
-
-                #debug 
-                '''
-                print("len(game_memory_lol) -->", len(game_memory_lol))
-                print("len(score_list) -->", len(score_list))
-                print("len(training_data) -->", len(training_data))
-                print("")
-                '''
 
             #* Reset parameters for each episode
             self.env.reset()
@@ -83,7 +79,7 @@ class GANNAgent:
                     self.env.render()
                     time.sleep(1/debug_frequency)
 
-                if is_crossover and len(prev_observation) and is_mutated == False > 0:
+                if is_crossover and len(prev_observation) > 0 and is_mutated == False:
                     #* Use current brain/model to predict action
                     self._get_parents_action(parent_model_1, parent_model_2, prev_observation)
                 else:
@@ -111,7 +107,7 @@ class GANNAgent:
                     cur_game_memory_list.append([prev_observation, action])
                     cur_choices_list.append(action)
 
-                prev_observation = observation # normalized to a sequential 400 inputs (20 x 20)
+                prev_observation = observation.flatten() # normalized to a sequential 400 inputs (20 x 20)
                 cur_score += reward
 
                 # Terminate when game has ended
@@ -225,10 +221,86 @@ class GANNAgent:
         self.generation_fitness.append(self.calculate_topscorers_fitness(accepted_score_list)) 
         return
 
+    #? Human Training 
+    def human_training_data(self, num_of_epoch=3,verbose=False):
+        training_data = []
+        self.env.reset()
+        game_memory = []
+        prev_observation = []
+        score = 0
+
+        # Start the game loop
+        while True:
+            action = -1 # Reset to invalid values first
+            self.env.render()
+
+            #* Enforce human player to play the game - no auto move
+            while action < 0:
+                time.sleep(0.1)
+
+                if keyboard.is_pressed('up'):
+                    action = 0
+                elif keyboard.is_pressed('right'):
+                    action = 1
+                elif keyboard.is_pressed('down'):
+                    action = 2
+                elif keyboard.is_pressed('left'):
+                    action = 3
+
+            observation, reward, done, info = self.env.step(action)
+
+            if verbose:
+                print(observation)
+                print("-> Action Taken: {ACTION}; Reward: {REWARD}; Done:{DONE}; Score: {SCORE}".format(ACTION=action, REWARD=reward, DONE=done, SCORE=score))            
+
+            # Log the game memory
+            if len(prev_observation) > 0:
+                game_memory.append([prev_observation.flatten(), action])
+
+            prev_observation = observation.flatten()
+            score += reward
+
+            #* End of training
+            if done:
+                print("[+] Human training completed.")
+                break
+            
+        #* Prepare training data
+        for data in game_memory:
+            if data[1] == 0: # data[1] is action; where data[0] is prev_observation
+                output = [1, 0, 0, 0] # Up
+            elif data[1] == 1:
+                output = [0, 1, 0, 0] # Right
+            elif data[1] == 2:
+                output = [0, 0, 1, 0] # Down
+            elif data[1] == 3:
+                output = [0, 0, 0, 1] # Left
+            
+        training_data.append([data[0], output])
+
+        #* Perform neural network fit (training the agent's brain)
+        human_model = self._train_fitted_model(training_data, num_of_epoch=num_of_epoch)
+
+        #* Save to file
+        training_data_save = np.array(training_data)
+        np.save('human_training_data_{RAND}.np'.format(RAND=str(random.randint(100000,999999))), training_data_save)
+        
+        return human_model
+
+    # Load saved model
+    def load_training_data_and_model_fit(self, filename, num_of_epoch=5):
+        # Load training data
+        training_data = np.load(filename, allow_pickle=True)
+
+        # Fit the model
+        model = self._train_fitted_model(self, training_data, num_of_epoch)       
+        
+        return model
+
     #* Train the model / brain
     def _train_fitted_model(self, training_data, num_of_epoch, model=False): 
-        #X = np.array([i[0] for i in training_data]).reshape(-1, len(training_data[0][0]), 1) # Observations
-        X = np.array([i[0] for i in training_data]).reshape([-1, 20, 20, 1]) #!experimental
+        X = np.array([i[0] for i in training_data]).reshape(-1, len(training_data[0][0]), 1) # Observations
+        #X = np.array([i[0] for i in training_data]).reshape([-1, 20, 20, 1]) #!experimental
         y = [i[1] for i in training_data]
 
         # Create a new graph / session
@@ -247,32 +319,32 @@ class GANNAgent:
 
     # Defining the neural network
     def _create_neural_network_model(self, input_size, output_size):
-        #network = input_data(shape=[None, input_size, 1], name='input')
-        network = input_data(shape=[None, 20, 20, 1], name='input') #!experimental hardcoded
+        network = input_data(shape=[None, input_size, 1], name='input')
+        #network = input_data(shape=[None, 20, 20, 1], name='input') #!experimental hardcoded
 
         #!experimental
-        network = conv_2d(network, 320, 2, activation="relu")
+        '''
+        network = conv_2d(network, 100, 2, activation="relu")
         network = max_pool_2d(network, 2)
 
-        network = conv_2d(network, 160, 2, activation="relu")
+        network = conv_2d(network, 100, 2, activation="relu")
         network = max_pool_2d(network, 2)
+        '''
         #/experiemntal
 
-        network = fully_connected(network, 80, activation="relu") # activation function = rectified linear
+        network = fully_connected(network, 15, activation="relu") # activation function = rectified linear
         network = dropout(network,0.8) # 80% retention
 
+        network = fully_connected(network, 15, activation="relu") # activation function = rectified linear
+        network = dropout(network,0.8) # 80% retention
+    
         network = fully_connected(network, output_size, activation='softmax') # 4 outputs or actions of agent
-        network = regression(network, optimizer='adam', learning_rate=self.learning_rate, loss='categorical_crossentropy', name='targets')
+        network = regression(network, optimizer='adam', learning_rate=self.learning_rate, loss='mean_square', name='targets')
 
         model = tflearn.DNN(network, tensorboard_dir='log')
 
         return model
 
-    #! Experimental: Convolution Neural Network
-    '''
-    def _conv_neural_network_model(self, input_size, output_size):
-        convnet = input_data(shape=[None, 400,400])
-    '''
     # Convert the board observation matrix into inputs
     def _convert_board_to_inputs(self, board):
         inputs = []
@@ -354,8 +426,8 @@ class GANNAgent:
 
     # Use a single model to predict the next move
     def _get_action(self, model, prev_observation):
-        #action = np.argmax(model.predict(np.array(prev_observation).reshape(-1, len(prev_observation), 1))[0])
-        action = np.argmax(model.predict(np.array(prev_observation).reshape(-1, 20, 20, 1))[0]) #!experimental
+        action = np.argmax(model.predict(np.array(prev_observation).reshape(-1, len(prev_observation), 1))[0])
+        #action = np.argmax(model.predict(np.array(prev_observation).reshape(-1, 20, 20, 1))[0]) #!experimental
 
         return action
     
@@ -363,28 +435,23 @@ class GANNAgent:
     def _get_parents_action(self, parent_model_1, parent_model_2, prev_observation):
         # 50% chance of either parent 1 or parent 2
         if random.random() > 0.5: 
-            #action = np.argmax(parent_model_1.predict(np.array(prev_observation).reshape(-1, len(prev_observation), 1))[0])
-            action = np.argmax(model.predict(np.array(prev_observation).reshape(-1, 20, 20, 1))[0]) #!experimental
+            action = np.argmax(parent_model_1.predict(np.array(prev_observation).reshape(-1, len(prev_observation), 1))[0])
+            #action = np.argmax(parent_model_1.predict(np.array(prev_observation).reshape(-1, 20, 20, 1))[0]) #!experimental
         else:
-            #action = np.argmax(parent_model_2.predict(np.array(prev_observation).reshape(-1, len(prev_observation), 1))[0])
-            action = np.argmax(model.predict(np.array(prev_observation).reshape(-1, 20, 20, 1))[0]) #!experimental
+            action = np.argmax(parent_model_2.predict(np.array(prev_observation).reshape(-1, len(prev_observation), 1))[0])
+            #action = np.argmax(parent_model_2.predict(np.array(prev_observation).reshape(-1, 20, 20, 1))[0]) #!experimental
         return action
         
     #* Play the selected model based on generation index
-    def play(self, model_generation_index=None, num_of_games=5, frequency=50, random_game=False):
+    def play(self, model=None, num_of_games=5, frequency=50, random_game=False):
         # If model not defined, choose the best fitness generation
-        '''
-        if not model_generation_index:
-            cur_model_index = self.most_fit_generation_index()
-            cur_model = self.model_list[cur_model_index]
-            print("[*] No model generation index defined, selected most fit generation index: {GEN}.".format(GEN=cur_model_index))
-        else:
-            cur_model = self.model_list[model_generation_index-1]
-        '''
-        if not self.current_snake_model:
+        if not self.current_snake_model and not model:
             print("[!] Error. No existing trained snake model.")
             return
-        cur_model = self.current_snake_model
+        if model:
+            cur_model = model
+        else:
+            cur_model = self.current_snake_model
 
         # Init
         cur_score_list = []
@@ -412,7 +479,7 @@ class GANNAgent:
                 # Execute a step
                 observation, reward, done, info = self.env.step(action)
 
-                prev_observation = observation # normalized to a sequential 400 inputs (20 x 20)
+                prev_observation = observation.flatten() # normalized to a sequential 400 inputs (20 x 20)
                 cur_score += reward
 
                 if done:
