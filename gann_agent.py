@@ -1,18 +1,20 @@
 # Author        : JS @breaktoprotect
 # Date started  : 4 August 2020
-# Description   : Attempting to implementic Genetic Algorithm with Neural Network to play Snake game 50 by 50 space
+# Description   : Attempting to implementic Genetic Algorithm with Neural Network to play Snake game (Gym Snake v3)
 import gym
 import numpy as np 
-import gym_snake2
+import gym_snake3 
+#import gym_snake #!experimental
 import time
 import random
 import tflearn
+import os
+import statistics
 
 # Standard Deep Neural Network 
 from tflearn.layers.core import input_data, dropout, fully_connected 
 from tflearn.layers.estimator import regression
-# Convo Neural Network
-from tflearn.layers.conv import conv_2d, max_pool_2d
+
 # For graph
 import tensorflow as tf
 
@@ -22,7 +24,8 @@ import keyboard
 class GANNAgent:
     def __init__(self, fitness_top_percentile=0.05, segment_width=25, mutation_rate=0.02, learning_rate=1e-3, width=20, height=20):
         # Environment
-        self.env = gym.make('snake2-v0', render=True, segment_width=25, width=width, height=height)
+        self.env = gym.make('snake3-v0', render=True, segment_width=25, width=width, height=height) 
+        #self.env = gym.make('snake-v0', render=True) #!experimental
         self.env.reset()
 
         # Genetic Algorithm
@@ -107,7 +110,7 @@ class GANNAgent:
                     cur_game_memory_list.append([prev_observation, action])
                     cur_choices_list.append(action)
 
-                prev_observation = observation.flatten() # normalized to a sequential 400 inputs (20 x 20)
+                prev_observation = observation # normalized to a sequential 400 inputs (20 x 20)
                 cur_score += reward
 
                 # Terminate when game has ended
@@ -251,13 +254,13 @@ class GANNAgent:
 
             if verbose:
                 print(observation)
-                print("-> Action Taken: {ACTION}; Reward: {REWARD}; Done:{DONE}; Score: {SCORE}".format(ACTION=action, REWARD=reward, DONE=done, SCORE=score))            
+                print("-> Action Taken: {ACTION}; Reward: {REWARD}; Done:{DONE}; Score: {SCORE}; Game Length: {LENGTH}".format(ACTION=action, REWARD=reward, DONE=done, SCORE=score, LENGTH=len(game_memory)))            
 
             # Log the game memory
             if len(prev_observation) > 0:
-                game_memory.append([prev_observation.flatten(), action])
+                game_memory.append([prev_observation, action])
 
-            prev_observation = observation.flatten()
+            prev_observation = observation
             score += reward
 
             #* End of training
@@ -276,14 +279,17 @@ class GANNAgent:
             elif data[1] == 3:
                 output = [0, 0, 0, 1] # Left
             
-        training_data.append([data[0], output])
+            training_data.append([data[0], output])
+
+        #debug
+        print("debug training_data:", training_data[:5][0])
 
         #* Perform neural network fit (training the agent's brain)
         human_model = self._train_fitted_model(training_data, num_of_epoch=num_of_epoch)
 
         #* Save to file
-        training_data_save = np.array(training_data)
-        np.save('human_training_data_{RAND}.np'.format(RAND=str(random.randint(100000,999999))), training_data_save)
+        #training_data_save = np.array(training_data)
+        np.save('human_training_data_on_{HEIGHT}_by_{WIDTH}_{RAND}'.format(RAND=str(random.randint(100000,999999)), WIDTH=self.env.ENV_WIDTH, HEIGHT=self.env.ENV_HEIGHT), training_data)
         
         return human_model
 
@@ -293,65 +299,62 @@ class GANNAgent:
         training_data = np.load(filename, allow_pickle=True)
 
         # Fit the model
-        model = self._train_fitted_model(self, training_data, num_of_epoch)       
+        model = self._train_fitted_model(training_data, num_of_epoch)       
         
+        return model
+
+    # Load a list of trainings and combine them to fit
+    def load_cumulative_training_data_and_model_fit(self, directory_path, num_of_epoch=5):
+        # Load list of training data files
+        combined_training_data = []
+
+        for filename in os.listdir(directory_path):
+            if ".npy" in filename:
+                # Combine them into a single training data set
+                combined_training_data.extend(np.load(directory_path + filename, allow_pickle=True)[:-3]) #[:-1] to exclude "death data"
+
+                #debug
+                print("debug:: combined with:", directory_path, filename)
+         
+        # Fit the model 
+        model = self._train_fitted_model(combined_training_data, num_of_epoch)  
+
         return model
 
     #* Train the model / brain
     def _train_fitted_model(self, training_data, num_of_epoch, model=False): 
         X = np.array([i[0] for i in training_data]).reshape(-1, len(training_data[0][0]), 1) # Observations
-        #X = np.array([i[0] for i in training_data]).reshape([-1, 20, 20, 1]) #!experimental
         y = [i[1] for i in training_data]
 
         # Create a new graph / session
-        new_graph = tf.Graph()
-        with new_graph.as_default(): #? working :)
-            if not model:
-                model = self._create_neural_network_model(input_size = len(X[0]), output_size= len(y[0]))
+        #new_graph = tf.Graph()
+        #with new_graph.as_default(): #? working :)
+        if not model:
+            model = self._create_neural_network_model(input_size = len(X[0]), output_size= len(y[0]))
 
-                #debug
-                print("len(X) -->",len(X[0]))
-                print("len(y) -->",len(y[0]))
-
-            model.fit({'input': X}, {'targets': y}, n_epoch=num_of_epoch,snapshot_step=1000, show_metric=True, run_id='gann_agent')
+        #early_stopping_cb = EarlyStoppingCallback(val_acc_thresh=0.80) #! experimental
+        model.fit({'input': X}, {'targets': y}, n_epoch=num_of_epoch,snapshot_step=1000, show_metric=True, run_id='gann_agent') # snapshot_epoch=False, callbacks=early_stopping_cb) #!experimental
 
         return model
 
     # Defining the neural network
     def _create_neural_network_model(self, input_size, output_size):
         network = input_data(shape=[None, input_size, 1], name='input')
-        #network = input_data(shape=[None, 20, 20, 1], name='input') #!experimental hardcoded
 
-        #!experimental
-        '''
-        network = conv_2d(network, 100, 2, activation="relu")
-        network = max_pool_2d(network, 2)
-
-        network = conv_2d(network, 100, 2, activation="relu")
-        network = max_pool_2d(network, 2)
-        '''
-        #/experiemntal
-
-        network = fully_connected(network, 15, activation="relu") # activation function = rectified linear
+        network = fully_connected(network, 512, activation="relu") # activation function = rectified linear
         network = dropout(network,0.8) # 80% retention
 
-        network = fully_connected(network, 15, activation="relu") # activation function = rectified linear
+        network = fully_connected(network, 512, activation="relu") # activation function = rectified linear
         network = dropout(network,0.8) # 80% retention
     
         network = fully_connected(network, output_size, activation='softmax') # 4 outputs or actions of agent
-        network = regression(network, optimizer='adam', learning_rate=self.learning_rate, loss='mean_square', name='targets')
+        network = regression(network, optimizer='adam', batch_size=16, learning_rate=self.learning_rate, loss='mean_square', name='targets')
+
+        #network = regression(network, batch_size=16, loss='mean_square', name='targets')
 
         model = tflearn.DNN(network, tensorboard_dir='log')
 
         return model
-
-    # Convert the board observation matrix into inputs
-    def _convert_board_to_inputs(self, board):
-        inputs = []
-        for cell in board:
-            inputs.extend(cell)
-
-        return inputs # in tuple
 
     def get_current_generation_index(self):
         return self.current_generation_index
@@ -386,28 +389,6 @@ class GANNAgent:
         #print("sorted score_list:",score_list)
 
         return min_score
-
-    '''
-    def _select_parents(self, minimum_generation):
-        # Ensure that first enough initial generations to pick from 
-        if len(self.generation_fitness) < minimum_generation:
-            print("[*] Skipping parents selection - currently insufficient minimum generation. Expecting at least {MIN}. Currently only {CUR}.".format(MIN=minimum_generation, CUR=len(self.generation_fitness)))
-            return None, None
-
-        gf_list = self.generation_fitness.copy()
-
-        # Sort to obtain highest to lowest
-        gf_list.sort(reverse=True)
-
-        # Select Top two from sorted list and find out the generation index from original list
-        gen_index1 = self.generation_fitness.index(gf_list[0])
-        gen_index2 = self.generation_fitness.index(gf_list[1])
-
-        # Debug
-        print("[+] Selected two generation index-> Gen Index 1:{GEN1}, Gen Index 2:{GEN2}".format(GEN1=gen_index1, GEN2=gen_index2))
-
-        return gen_index1, gen_index2
-    '''
 
     def most_fit_generation_index(self):
         if not len(self.generation_fitness) > 0:
@@ -445,9 +426,6 @@ class GANNAgent:
     #* Play the selected model based on generation index
     def play(self, model=None, num_of_games=5, frequency=50, random_game=False):
         # If model not defined, choose the best fitness generation
-        if not self.current_snake_model and not model:
-            print("[!] Error. No existing trained snake model.")
-            return
         if model:
             cur_model = model
         else:
@@ -469,7 +447,7 @@ class GANNAgent:
                 time.sleep(1/frequency)
                 self.env.render()
 
-                if len(prev_observation)  > 0 and not random_game:
+                if len(prev_observation) > 0 and not random_game:
                     #* Use current brain/model to predict action
                     action = self._get_action(cur_model, prev_observation)
                 else:
@@ -479,7 +457,7 @@ class GANNAgent:
                 # Execute a step
                 observation, reward, done, info = self.env.step(action)
 
-                prev_observation = observation.flatten() # normalized to a sequential 400 inputs (20 x 20)
+                prev_observation = observation 
                 cur_score += reward
 
                 if done:
@@ -489,4 +467,34 @@ class GANNAgent:
             # End of current game
             cur_score_list.append(cur_score)
         
+        # Display summary of results
+        sorted_list = cur_score_list
+        sorted_list.sort(reverse=True)
+        average = statistics.mean(cur_score_list)
         print("[*] Summary of scores:",cur_score_list)
+        print("    -> Highest score:", sorted_list[0])
+        print("    -> Average score:", average)
+
+        # Log model-played games
+        try:
+            np.loadtxt("model_played_records.csv")
+            np.savetxt("model_played_records", cur_score_list)
+        except:
+            print("[-] No existing records as of yet.")
+            np.savetxt("model_played_records.csv", cur_score_list)
+
+# !experimental - doesn't work in this tflearn/tensorflow version
+'''
+class EarlyStoppingCallback(tflearn.callbacks.Callback):
+    def __init__(self, val_acc_thresh):
+        """ Note: We are free to define our init function however we please. """
+        self.val_acc_thresh = val_acc_thresh
+    
+    def on_epoch_end(self, training_state):
+        """ """
+        # Apparently this can happen.
+        if training_state.val_acc is None: return
+        if training_state.val_acc > self.val_acc_thresh:
+            raise StopIteration
+        print("test, epoch ended!!!")
+'''
